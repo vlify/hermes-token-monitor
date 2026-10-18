@@ -187,6 +187,19 @@ def test_profile_factories_keep_separate_ledgers(tmp_path, monkeypatch):
     assert second.ledger.get_all_time_stats().total_tokens == 0
 
 
+def test_legacy_unidentified_session_and_fallback_global_freeze(tmp_path):
+    path = tmp_path / "state.json"
+    record = dict(total_tokens=50, input_tokens=50, request_count=1)
+    path.write_text(json.dumps(dict(session=record, daily=record, all_time=record,
+        day="2026-10-18", frozen=True, freeze_reason="legacy root freeze")))
+    hooks = _hooks(path, freeze_on_limit=True)
+    assert hooks.ledger.get_session_stats("default").total_tokens == 50
+    assert hooks.on_pre_tool_call()
+    assert _hooks(path, scope="all_time", freeze_on_limit=True).on_pre_tool_call()
+    _event(hooks, session="default", amount=1)
+    assert hooks.ledger.get_session_stats("default").total_tokens == 51
+
+
 def test_warning_transition_committed_once_across_threads(tmp_path, caplog):
     import threading
     hooks = _hooks(tmp_path / "state.json", limit_total_tokens=20, warning_levels=[0.5])

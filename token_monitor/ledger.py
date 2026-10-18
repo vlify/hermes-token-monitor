@@ -81,9 +81,12 @@ def _normalize_state(data: Any, today: str) -> dict[str, Any]:
     data.setdefault("sessions", {})
     if not isinstance(data["sessions"], dict):
         raise LedgerStateError("sessions must be an object")
+    had_sessions = bool(data["sessions"])
     sid = data.get("session_id", "")
     if not isinstance(sid, str):
         raise LedgerStateError("Invalid session_id")
+    if not sid and "session" in data:
+        sid = "default"
     if sid and "session" in data and sid not in data["sessions"]:
         data["sessions"][sid] = copy.deepcopy(data["session"])
     daily = data.setdefault("daily", {"date": today, "stats": {}})
@@ -110,8 +113,11 @@ def _normalize_state(data: Any, today: str) -> dict[str, Any]:
         for raw in (daily["stats"], data["all_time"]):
             if not isinstance(raw, dict):
                 raise LedgerStateError("Invalid global usage record")
-            raw.setdefault("frozen", data.get("global_frozen", False))
-            raw.setdefault("freeze_reason", data.get("global_freeze_reason", ""))
+            frozen = data.get("global_frozen", False)
+            if not had_sessions:
+                frozen = frozen or data.get("frozen", False)
+            raw.setdefault("frozen", frozen)
+            raw.setdefault("freeze_reason", data.get("global_freeze_reason") or data.get("freeze_reason", ""))
         _migrate_warning_history(data)
         data["token_monitor_migrated"] = True
     for raw in [*data["sessions"].values(), daily["stats"], data["all_time"]]:
@@ -138,7 +144,7 @@ def _migrate_warning_history(data: dict) -> None:
         if not 0 < value <= 1:
             continue
         if scope == "session":
-            raw = data["sessions"].get(sid)
+            raw = data["sessions"].get(sid or "default")
         elif scope == "daily":
             raw = data["daily"]["stats"] if day == data["daily"]["date"] else None
         else:
