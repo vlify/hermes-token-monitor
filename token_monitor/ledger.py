@@ -89,6 +89,12 @@ class TokenLedger:
                     raise TypeError("State is not a JSON object")
                 if "sessions" not in data:
                     data["sessions"] = {}
+                # Legacy tokenwatch state compatibility migration
+                if "day" in data and isinstance(data.get("daily"), dict) and "stats" not in data["daily"]:
+                    data["daily"] = {
+                        "date": str(data.get("day")),
+                        "stats": data["daily"],
+                    }
                 if "daily" not in data:
                     data["daily"] = {"date": self._today(), "stats": UsageRecord().to_dict()}
                 if "all_time" not in data:
