@@ -20,6 +20,11 @@ def get_hooks() -> TokenMonitorHooks:
 def register(ctx: Any = None) -> None:
     """Hermes plugin registration callback."""
     get_hooks()
+    if ctx is not None and hasattr(ctx, "register_hook"):
+        ctx.register_hook("on_session_start", on_session_start)
+        ctx.register_hook("post_api_request", on_post_api_request)
+        ctx.register_hook("pre_tool_call", on_pre_tool_call)
+        ctx.register_hook("on_session_end", on_session_end)
 
 
 def on_session_start(*args: Any, **kwargs: Any) -> None:
