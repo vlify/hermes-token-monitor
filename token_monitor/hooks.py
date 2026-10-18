@@ -33,13 +33,18 @@ class TokenMonitorHooks:
     """Encapsulates all hook logic and maintains ledger / exporter instances."""
 
     def __init__(self, config: MonitorConfig | None = None):
-        self.config = config or MonitorConfig()
+        if config is None:
+            from token_monitor.config import load_config
+
+            config = load_config()
+        self.config = config
         self.ledger = TokenLedger(self.config)
         self.exporter = (
             PrometheusExporter(self.config.prom_export_path)
             if self.config.prom_export_path
             else None
         )
+
 
     def on_session_start(
         self,

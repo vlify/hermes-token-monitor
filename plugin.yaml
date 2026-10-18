@@ -1,4 +1,4 @@
-name: hermes-token-monitor
+name: tokenwatch
 version: 0.1.0
 description: High-precision token usage monitor, multi-session quota tracker, and threshold alert plugin for Hermes Agent.
 provides_hooks:

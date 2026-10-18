@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+logger = logging.getLogger("hermes.plugin.token_monitor.config")
+
 CONFIG_ENV = "HERMES_TOKEN_MONITOR_CONFIG"
+
 STATE_ENV = "HERMES_TOKEN_MONITOR_STATE"
 
 DEFAULT_STATE_PATH = "~/.local/state/hermes/token_monitor/state.json"
@@ -54,3 +58,29 @@ class MonitorConfig:
             "state_file": str(data.get("state_file", "")),
         }
         return cls(**fields)
+
+
+def load_config() -> MonitorConfig:
+    """Load configuration from Hermes config.yaml and environment, with fallback to legacy state."""
+    data: dict[str, Any] = {}
+    try:
+        from hermes_cli.config import load_config as hermes_load_config
+
+        root = hermes_load_config()
+        if isinstance(root, dict):
+            plugins_cfg = root.get("plugins", {})
+            entries = plugins_cfg.get("entries", {})
+            raw_entry = entries.get("tokenwatch") or entries.get("hermes-token-monitor")
+            if isinstance(raw_entry, dict):
+                data.update(raw_entry)
+    except (ImportError, AttributeError, KeyError) as exc:
+        logger.debug("Failed to read hermes configuration dynamically: %s", exc)
+
+    if not data.get("state_file"):
+        legacy_state = Path("~/.config/hermes/tokenwatch/state.json").expanduser()
+        if legacy_state.is_file():
+            data["state_file"] = str(legacy_state)
+
+    return MonitorConfig.from_dict(data)
+
+
