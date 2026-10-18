@@ -79,5 +79,5 @@ def test_pre_tool_call_freeze(temp_dir):
     # Pre tool call should now abort
     abort_res = hooks.on_pre_tool_call(tool_name="bash", session_id="sess-2")
     assert abort_res is not None
-    assert abort_res.get("abort") == "true"
+    assert abort_res.get("action") == "block"
     assert "Limit reached" in abort_res.get("message", "")

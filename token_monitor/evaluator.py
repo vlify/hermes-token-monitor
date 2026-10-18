@@ -27,7 +27,7 @@ def evaluate_usage(record: UsageRecord, config: MonitorConfig) -> EvaluationResu
         for lvl in config.warning_levels:
             thresh = int(limit * lvl)
             if record.total_tokens >= thresh:
-                already = any(abs(l - lvl) < 1e-4 for l in record.warned_levels)
+                already = any(abs(warned - lvl) < 1e-4 for warned in record.warned_levels)
                 if not already:
                     new_levels.append(lvl)
 

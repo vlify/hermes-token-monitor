@@ -80,11 +80,12 @@ def test_concurrent_threads_writing(temp_dir):
     assert stats.request_count == num_threads * 5
 
 
-def test_daily_rollover(temp_dir):
+def test_daily_rollover(temp_dir, monkeypatch):
     """Daily stats should reset on new date, but sessions and all_time persist."""
     state_file = temp_dir / "state.json"
     cfg = MonitorConfig(state_file=str(state_file), scope="daily")
     ledger = TokenLedger(cfg)
+    monkeypatch.setattr(TokenLedger, "_today", staticmethod(lambda: "2026-10-18"))
 
     # Record under fake date
     ledger.record_usage(

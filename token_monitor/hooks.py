@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any
 
 from token_monitor.config import MonitorConfig
-from token_monitor.evaluator import evaluate_usage
 from token_monitor.exporter import PrometheusExporter
 from token_monitor.ledger import TokenLedger
 
@@ -14,6 +14,8 @@ logger = logging.getLogger("hermes.plugin.token_monitor")
 
 
 def _extract_usage(usage: Any, response: Any) -> tuple[int, int, int]:
+    if not isinstance(usage, dict) and isinstance(response, dict):
+        usage = response.get("usage")
     if isinstance(usage, dict):
         inp = int(usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0)
         out = int(usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0)
@@ -39,6 +41,8 @@ class TokenMonitorHooks:
             config = load_config()
         self.config = config
         self.ledger = TokenLedger(self.config)
+        self._footer_turns: dict[str, int] = {}
+        self._footer_lock = threading.Lock()
         self.exporter = (
             PrometheusExporter(self.config.prom_export_path)
             if self.config.prom_export_path
@@ -63,6 +67,7 @@ class TokenMonitorHooks:
         session_id: str = "",
         usage: Any = None,
         response: Any = None,
+        api_request_id: str = "",
         **kwargs: Any,
     ) -> None:
         sid = str(session_id or "default").strip() or "default"
@@ -70,23 +75,20 @@ class TokenMonitorHooks:
         if tot <= 0:
             return
 
-        self.ledger.record_usage(sid, inp, out, tot)
+        raw = usage if isinstance(usage, dict) else (
+            response.get("usage", {}) if isinstance(response, dict) else {})
+        extra = {
+            "cache_read_tokens": int(raw.get("cache_read_tokens", raw.get("cached_tokens", 0)) or 0),
+            "cache_write_tokens": int(raw.get("cache_write_tokens", 0) or 0),
+            "reasoning_tokens": int(raw.get("reasoning_tokens", raw.get("thinking_tokens", 0)) or 0),
+        }
+        res = self.ledger.record_usage(sid, inp, out, tot, request_id=api_request_id, **extra)
+        if res is None:
+            return
+        if res.new_warning_levels and self.config.notify_console:
+            logger.warning("[token_monitor] %s", res.message)
 
-        if self.config.scope == "session":
-            record = self.ledger.get_session_stats(sid)
-        elif self.config.scope == "daily":
-            record = self.ledger.get_daily_stats()
-        else:
-            record = self.ledger.get_all_time_stats()
-
-        res = evaluate_usage(record, self.config)
-        for lvl in res.new_warning_levels:
-            self.ledger.mark_warned(sid, lvl)
-            if self.config.notify_console:
-                logger.warning("[token_monitor] %s", res.message)
-
-        if res.should_freeze and not self.ledger.is_frozen(sid):
-            self.ledger.set_frozen(sid, True, reason=res.freeze_reason)
+        if res.should_freeze:
             logger.error("[token_monitor] %s", res.freeze_reason)
 
         if self.exporter:
@@ -100,11 +102,53 @@ class TokenMonitorHooks:
         **kwargs: Any,
     ) -> dict[str, str] | None:
         sid = str(session_id or "default").strip() or "default"
-        if self.ledger.is_frozen(sid):
-            reason = self.ledger.get_freeze_reason(sid) or "Token limit reached"
-            return {"abort": "true", "message": f"Tool execution halted: {reason}"}
+        if not self.config.freeze_on_limit:
+            return None
+        record = self.ledger.get_scoped_stats(sid)
+        if record.frozen:
+            reason = record.freeze_reason or "Token limit reached"
+            return {"action": "block", "message": f"Tool execution halted: {reason}"}
         return None
+
+    def on_transform_llm_output(
+        self, response_text: str = "", session_id: str = "", **kwargs: Any,
+    ) -> str | None:
+        """Append the existing warning footer through Hermes' final-response transform."""
+        if not response_text.strip() or self.config.footer_mode == "off":
+            return None
+        if "\n---\n[Token:" in response_text:
+            return None
+        sid = str(session_id or "default").strip() or "default"
+        record = self.ledger.get_scoped_stats(sid)
+        limit = self.config.limit_total_tokens
+        with self._footer_lock:
+            turn = self._footer_turns.get(sid, 0) + 1
+            self._footer_turns[sid] = turn
+        if self.config.footer_mode == "on_warning":
+            levels = self.config.warning_levels
+            if not levels or limit <= 0 or record.total_tokens < int(limit * min(levels)):
+                return None
+            if (turn - 1) % self.config.footer_warning_interval:
+                return None
+        used = record.total_tokens
+        if limit > 0:
+            text = f"Token: {int(used / limit * 100)}% ({_compact(used)}/{_compact(limit)})"
+        else:
+            text = f"Token: {_compact(used)}"
+        if self.config.scope != "session":
+            text += f" {self.config.scope} | 全局累计，/new 不重置"
+        ending = "limit reached. 已达上限" if limit > 0 and used >= limit else "used. 建议规划收尾"
+        return f"{response_text}\n\n---\n[{text} {ending}]"
 
     def on_session_end(self, *, session_id: str = "", **kwargs: Any) -> None:
         sid = str(session_id or "default").strip() or "default"
         logger.debug("token_monitor: session end sid=%s", sid)
+        with self._footer_lock:
+            self._footer_turns.pop(sid, None)
+
+
+def _compact(value: int) -> str:
+    for scale, suffix in ((1_000_000, "M"), (1_000, "k")):
+        if value >= scale:
+            return f"{value / scale:.1f}".removesuffix(".0") + suffix
+    return str(value)

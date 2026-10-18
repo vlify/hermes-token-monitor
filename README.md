@@ -38,19 +38,31 @@ Configure in your Hermes `config.yaml` or via environment variables:
 
 ```yaml
 plugins:
-  token_monitor:
-    scope: "session"                # "session" | "daily" | "all_time"
-    limit_total_tokens: 20000000    # Total quota limit (e.g. 20M tokens)
-    warning_levels: [0.5, 0.8, 0.95] # Trigger notifications at 50%, 80%, 95%
-    freeze_on_limit: false          # Intercept tool calls when limit is reached
-    notify_console: true            # Log alerts to stderr/stdout
-    prom_export_path: "/tmp/hermes_tokens.prom" # Optional Prometheus metrics path
+  entries:
+    tokenwatch:
+      scope: "session"                # "session" | "daily" | "all_time"
+      limit_total_tokens: 20000000
+      warning_levels: [0.5, 0.8, 0.95]
+      freeze_on_limit: false
+      notify_console: true
+      footer_mode: "on_warning"        # off | on_warning | always
+      footer_warning_interval: 1
 ```
 
 ### Environment Overrides
 
 * `HERMES_TOKEN_MONITOR_CONFIG`: Path to JSON/YAML configuration file.
-* `HERMES_TOKEN_MONITOR_STATE`: Path to state persistence JSON file (defaults to `~/.local/state/hermes/token_monitor/state.json`).
+* `HERMES_TOKEN_MONITOR_STATE`: Explicit state file override. In Hermes, the default is the current profile's `tokenwatch/state.json`; standalone use retains `~/.local/state/hermes/token_monitor/state.json`.
+
+## 状态保全与兼容
+
+- getter 不再写入状态文件；损坏 JSON、错误结构或非法计数会抛出 `LedgerStateError` 并保留原文件，不自动清零。先备份和排查损坏原因，不能直接用空账本覆盖历史。
+- 正常增量写入时兼容旧 `day/daily`、单会话镜像、sessions 注册表、全局冻结和已发 total 阈值。保留缓存/思考计数、未知字段与原始 warned_keys；不重建旧版本已经丢失的历史。
+- 请求计数、去重、阈值和冻结转换在同一 POSIX 文件锁事务内提交。具备 api_request_id 的请求按会话去重，最近 4096 个请求身份的摘要持久化；超出窗口的重放不保证去重。缺少请求身份时不按 token 数猜测重复。
+- 默认恢复回复 footer，独立网关通知保持关闭；不新增消息注入或外部投递。footer 走 Hermes 的 `transform_llm_output`，不会重写历史消息；达到软阈值时提示收尾，启用 freeze_on_limit 才通过 action=block 阻止工具。
+- 更换插件文件不等于运行网关已加载。主配置和服务操作由用户执行；本轮代码更新不自动重启或主动迁移生产账本。
+
+迁移测试只用合成旧状态，不能读取真实生产账本。完整测试从 Hermes 源码仓的官方 runner 执行，并通过 `-o pythonpath=<本项目绝对路径>` 指定候选；具体命令与结果见本轮修复交接。
 
 ---
 

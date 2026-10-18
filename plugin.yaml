@@ -6,4 +6,5 @@ provides_hooks:
   - pre_tool_call
   - on_session_start
   - on_session_end
+  - transform_llm_output
 provides_tools: []
