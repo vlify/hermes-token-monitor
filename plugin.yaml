@@ -1,0 +1,9 @@
+name: hermes-token-monitor
+version: 0.1.0
+description: High-precision token usage monitor, multi-session quota tracker, and threshold alert plugin for Hermes Agent.
+provides_hooks:
+  - post_api_request
+  - pre_tool_call
+  - on_session_start
+  - on_session_end
+provides_tools: []
