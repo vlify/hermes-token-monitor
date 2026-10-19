@@ -20,6 +20,8 @@ hermes plugins doctor /absolute/path/to/hermes-token-monitor --ci
 
 也可把包含 `plugin.yaml`、根 `__init__.py` 和 `token_monitor/` 的目录放到**目标 profile 的** `plugins/tokenwatch/`，再启用。目标根目录遵循 Hermes 的 profile 和 `HERMES_HOME` 解析，不需要使用作者的目录布局。已有插件请先备份；账本放在插件代码目录之外。
 
+备份目录也必须放在插件扫描目录之外。`plugins/tokenwatch.bak/` 只要仍包含相同名称的 manifest，就可能参与发现并覆盖正式插件；目录名带 `.bak` 不代表禁用。
+
 Python 包另提供 `hermes_agent.plugins` entry point，供 Hermes 环境包管理器安装后发现；仅在另一个 venv 中 pip 安装不会自动进入正在运行的 Hermes。目录安装同时提供 manifest 的设置表单，推荐普通用户使用。
 
 已有进程如何重新加载插件，遵循所用 Hermes 版本的机制；文件更新不能证明运行中的网关已加载。插件不自动重启服务、不改写主配置。
@@ -81,6 +83,8 @@ plugins:
 
 设置在下一次 Hook 调用时重新读取，账本继续保留。显式把不同 profile 指向同一账本，等于主动共享配额和会话 ID 命名空间；默认各自隔离。非法类型、负额度、无效范围会给出包含设置名的错误，不把字符串 `"false"` 当作布尔值。旧 `notify_gateway: true` 会明确报错：独立网关通知未实现，请使用 footer 或指标导出。
 
+本版修正新请求的输入计数口径，但不会追溯重算旧账本：旧版本保存的输入计数可能不含缓存。历史总量原样保留；对已有历史启用输入额度时应考虑这一差异。
+
 ## 统计与冻结口径
 
 - 主调用接收 `post_api_request` 中 Hermes 归一化后的 usage。输入统计优先取包含缓存的 `prompt_tokens`；缓存读写作为明细保留，不重复加到总量。思考 token 是输出明细，不额外加到输出／总量。
@@ -126,6 +130,22 @@ HERMES_PYTHON=/path/to/test/python scripts/run_tests.sh -j 2 \
 ```
 
 测试包括配置优先级、profile ContextVar 隔离、并发事务、旧状态保全、事件去重、缓存计数、三类额度、辅助统计开关、语言、实际 Hook 阻断和管理命令。测试不读生产账本、不发送通知、不调用真实模型。
+
+### 生产验收记录：2026-10-19
+
+在 Linux/Python 3.14 的实际 Hermes 安装中，使用 `openai-codex` 的 `gpt-6.1-sol`，通过 CLI 完成 A → B → A 三轮真实请求，并逐项核对供应商 usage、插件账本和 Hermes 会话数据库：
+
+| 请求 | 未缓存输入 | 缓存读取 | 输出 | 总量 |
+|---|---:|---:|---:|---:|
+| 会话 A 首轮 | 2601 | 0 | 10 | 2611 |
+| 会话 B 首轮 | 2607 | 0 | 10 | 2617 |
+| 会话 A 续聊 | 475 | 2432 | 12 | 2919 |
+
+A 累计 5530 tokens／2 次请求，B 累计 2617 tokens／1 次请求，全局增量恰好 8147 tokens／3 次请求。缓存输入未漏计、未重复计入总量，续聊未清零或串账。测试请求未调用工具，生产额度和主配置保持原样。
+
+官方插件控制接口完成生产网关热加载，两个适配器重新挂接，服务 PID 与启动时间不变。这里只验证了网关加载状态；聊天平台消息到回复的完整链路未包含在这三轮 CLI 实测中。
+
+本轮隔离回归由 Hermes 官方 runner 执行：60 passed，0 failed，包含真实目录加载器更换业务模块的热加载用例；Plugin Doctor 和全仓 Ruff E4/E7/E9/F 检查通过。生产冻结阈值未人为降低，冻结与辅助统计开关由隔离回归验证。
 
 ## License
 
