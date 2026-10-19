@@ -38,6 +38,10 @@ config_schema:
     type: bool
     description: "Log newly crossed warning thresholds"
     default: true
+  notify_gateway:
+    type: bool
+    description: "Send one independent alert to the triggering chat/thread via its live Hermes adapter"
+    default: false
   footer_mode:
     type: str
     description: "Reply footer: off, on_warning or always"

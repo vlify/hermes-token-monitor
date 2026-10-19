@@ -29,6 +29,7 @@ def handle_command(args: argparse.Namespace) -> None:
         "session_id": sid or None,
         "state_file": str(hooks.ledger.state_path),
         "include_auxiliary_calls": hooks.config.include_auxiliary_calls,
+        "notify_gateway": hooks.config.notify_gateway,
         "limits": {name: getattr(hooks.config, f"limit_{name}_tokens")
                    for name in ("total", "input", "output")},
         "usage": stats,

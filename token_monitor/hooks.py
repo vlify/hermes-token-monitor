@@ -54,6 +54,7 @@ class TokenMonitorHooks:
         usage: Any = None,
         response: Any = None,
         api_request_id: str = "",
+        platform: str = "",
         **kwargs: Any,
     ) -> None:
         sid = str(session_id or "default").strip() or "default"
@@ -75,6 +76,10 @@ class TokenMonitorHooks:
 
         if res.should_freeze:
             logger.error("[token_monitor] %s", res.freeze_reason)
+
+        if self.config.notify_gateway and (res.new_warning_levels or res.should_freeze):
+            from .notifications import send_alert
+            send_alert(sid, platform, res, self.config)
 
         if self.exporter:
             try:

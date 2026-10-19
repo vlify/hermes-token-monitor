@@ -49,8 +49,6 @@ class MonitorConfig:
         for key in ("freeze_on_limit", "notify_console", "notify_gateway", "include_auxiliary_calls"):
             if type(getattr(self, key)) is not bool:
                 raise ValueError(f"{key} must be a boolean, not a string or number")
-        if self.notify_gateway:
-            raise ValueError("notify_gateway is unsupported; use footer_mode or prom_export_path")
         if not isinstance(self.warning_levels, list) or any(
             isinstance(x, bool) or not isinstance(x, (float, int)) or not math.isfinite(x)
             or not 0 < x <= 1 for x in self.warning_levels

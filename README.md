@@ -45,6 +45,7 @@ plugins:
         limit_output_tokens: 0
         warning_levels: [0.5, 0.8, 0.95]
         freeze_on_limit: false
+        notify_gateway: false
         footer_mode: on_warning
         footer_warning_interval: 1
         language: en
@@ -61,6 +62,7 @@ plugins:
 | `warning_levels` | `[0.5, 0.8, 0.95]` | 阈值比例，排序并去重 |
 | `freeze_on_limit` | `false` | 超限后阻止工具调用 |
 | `notify_console` | `true` | 记录新跨越阈值的日志 |
+| `notify_gateway` | `false` | 通过当前会话的在线适配器独立发送一次额度告警 |
 | `footer_mode` | `on_warning` | `off`、`on_warning` 或 `always` |
 | `footer_warning_interval` | `1` | 每 N 次该会话的非空回复展示警告 |
 | `language` | `en` | 回复提示语言：`en` 或 `zh` |
@@ -81,9 +83,25 @@ plugins:
 
 新旧标识同时存在时使用 `tokenwatch`。相对账本和导出路径以当前 profile 为基准，不随启动工作目录变化；`~` 展开到当前用户。未在 Hermes 中运行且未指定 profile 时，独立账本默认位于 `~/.local/state/hermes/token_monitor/state.json`。独立使用 YAML 需要 Hermes YAML 库或 PyYAML；JSON 无额外依赖。
 
-设置在下一次 Hook 调用时重新读取，账本继续保留。显式把不同 profile 指向同一账本，等于主动共享配额和会话 ID 命名空间；默认各自隔离。非法类型、负额度、无效范围会给出包含设置名的错误，不把字符串 `"false"` 当作布尔值。旧 `notify_gateway: true` 会明确报错：独立网关通知未实现，请使用 footer 或指标导出。
+设置在下一次 Hook 调用时重新读取，账本继续保留。显式把不同 profile 指向同一账本，等于主动共享配额和会话 ID 命名空间；默认各自隔离。非法类型、负额度、无效范围会给出包含设置名的错误，不把字符串 `"false"` 当作布尔值。
 
 本版修正新请求的输入计数口径，但不会追溯重算旧账本：旧版本保存的输入计数可能不含缓存。历史总量原样保留；对已有历史启用输入额度时应考虑这一差异。
+
+## 独立网关告警
+
+设置 `plugins.entries.tokenwatch.settings.notify_gateway: true` 后，新跨越的额度阈值会触发一条独立告警。告警复用当前 profile 的在线 Hermes 适配器及其 `send` 接口，使用当前调用绑定的 chat、thread 和 reply anchor，不调用模型、不修改对话历史、不自行创建平台客户端。与回复 footer 分别控制；只要独立告警可把 `footer_mode` 设为 `off`。
+
+路由契约覆盖 Matrix、Telegram（群话题和私聊话题）、Discord、Slack、Email、飞书以及遵循相同适配器接口的平台。通用层会把原始 chat ID、thread ID 和消息回复锚点分别传递，不拼接解析可能含冒号的房间 ID。具体平台的最终展示遵循 Hermes 适配器能力，不声明所有 SDK 版本均已实测。
+
+同一阈值在账本锁内只提交一次；跨过多个阈值或同时触发冻结时，单次更新合并为一条告警。网络发送在网关事件循环中异步执行，不占用模型调用或账本文件锁。告警遵循宿主的 `suppress_warning_notifications` 展示策略。
+
+为避免串房间，只接受 task-bound ContextVar 中的目标，且会话 ID、平台必须与 usage 事件一致。不从进程环境变量、上一次会话、默认 profile、home channel 或指定频道猜测目标。CLI／无目标后台调用、没有在线适配器、会话身份不匹配时跳过独立告警，记账与 footer 继续工作。辅助调用只有绑定了匹配的会话身份和目标时才可通知。
+
+这是持久化的 **at-most-once attempt**：提交阈值后只尝试投递一次，插件不自动重发。超时、发送失败、关闭前未完成或进程在提交后中断，都可能使该次告警未送达；不会冒险重复发送。失败只记录结果类别，不输出可能包含凭据的适配器异常文本。原有 footer 与日志仍可作为提示渠道。启用独立告警不会补发已消费的历史阈值。
+
+不支持通知到另一个指定频道、Webhook 或独立第三方推送服务。默认关闭；插件更新不会替用户改写主配置或开启外发。
+
+本轮隔离回归共 79 项通过，其中 19 项覆盖告警路由、并发去重、失败、禁用和 profile 隔离。平台发送器使用受控替身，实际执行宿主事件循环调度；这证明通用参数与状态契约，不代表上述平台均已完成真实外发验收。`hermes tokenwatch status` 会显示 `notify_gateway` 当前开关。
 
 ## 统计与冻结口径
 

@@ -15,6 +15,9 @@ class EvaluationResult:
     should_freeze: bool = False
     freeze_reason: str = ""
     message: str = ""
+    metric: str = "total"
+    used: int = 0
+    limit: int = 0
 
 
 def budget_progress(record: UsageRecord, config: MonitorConfig) -> tuple[str, int, int]:
@@ -60,4 +63,7 @@ def evaluate_usage(record: UsageRecord, config: MonitorConfig) -> EvaluationResu
         should_freeze=should_freeze,
         freeze_reason=freeze_reason,
         message="\n".join(messages),
+        metric=metric,
+        used=used,
+        limit=limit,
     )
