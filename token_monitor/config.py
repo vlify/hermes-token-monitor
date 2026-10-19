@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import logging
 import json
+import logging
+import math
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -32,37 +33,43 @@ class MonitorConfig:
     footer_warning_interval: int = 1
     prom_export_path: str = ""
     state_file: str = ""
+    language: str = "en"
+    include_auxiliary_calls: bool = False
 
     def __post_init__(self) -> None:
+        for key in ("prom_export_path", "state_file"):
+            if not isinstance(getattr(self, key), str):
+                raise TypeError(f"{key} must be a path string")
         self.state_file = str(Path(self.state_file or os.getenv(STATE_ENV, "").strip()
                                    or DEFAULT_STATE_PATH).expanduser())
 
-        # Ensure warning levels are sorted floats
-        self.warning_levels = sorted(float(x) for x in self.warning_levels if 0.0 < float(x) <= 1.0)
-        self.scope = self.scope.lower().strip()
+        for key in ("limit_total_tokens", "limit_input_tokens", "limit_output_tokens"):
+            if type(getattr(self, key)) is not int or getattr(self, key) < 0:
+                raise ValueError(f"{key} must be a non-negative integer (0 disables the limit)")
+        for key in ("freeze_on_limit", "notify_console", "notify_gateway", "include_auxiliary_calls"):
+            if type(getattr(self, key)) is not bool:
+                raise ValueError(f"{key} must be a boolean, not a string or number")
+        if self.notify_gateway:
+            raise ValueError("notify_gateway is unsupported; use footer_mode or prom_export_path")
+        if not isinstance(self.warning_levels, list) or any(
+            isinstance(x, bool) or not isinstance(x, (float, int)) or not math.isfinite(x)
+            or not 0 < x <= 1 for x in self.warning_levels
+        ):
+            raise ValueError("warning_levels must be a list of fractions in (0, 1], e.g. [0.5, 0.8]")
+        self.warning_levels = sorted({float(x) for x in self.warning_levels})
         if self.scope not in ("session", "daily", "all_time"):
-            self.scope = "session"
+            raise ValueError("scope must be session, daily or all_time")
         if self.footer_mode not in ("off", "on_warning", "always"):
             raise ValueError("footer_mode must be off, on_warning or always")
-        self.footer_warning_interval = max(1, int(self.footer_warning_interval))
+        if type(self.footer_warning_interval) is not int or self.footer_warning_interval < 1:
+            raise ValueError("footer_warning_interval must be a positive integer")
+        if self.language not in ("en", "zh"):
+            raise ValueError("language must be en or zh")
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> MonitorConfig:
-        fields = {
-            "scope": str(data.get("scope", "session")),
-            "limit_total_tokens": int(data.get("limit_total_tokens", 20_000_000)),
-            "limit_input_tokens": int(data.get("limit_input_tokens", 0)),
-            "limit_output_tokens": int(data.get("limit_output_tokens", 0)),
-            "warning_levels": list(data.get("warning_levels", [0.5, 0.8, 0.95])),
-            "freeze_on_limit": bool(data.get("freeze_on_limit", False)),
-            "notify_console": bool(data.get("notify_console", True)),
-            "notify_gateway": bool(data.get("notify_gateway", False)),
-            "footer_mode": str(data.get("footer_mode", "on_warning")),
-            "footer_warning_interval": int(data.get("footer_warning_interval", 1)),
-            "prom_export_path": str(data.get("prom_export_path", "")),
-            "state_file": str(data.get("state_file", "")),
-        }
-        return cls(**fields)
+        known = {f.name for f in fields(cls)}
+        return cls(**{key: value for key, value in data.items() if key in known})
 
 
 def load_config() -> MonitorConfig:
@@ -77,9 +84,14 @@ def load_config() -> MonitorConfig:
         if isinstance(root, dict):
             plugins_cfg = root.get("plugins", {})
             entries = plugins_cfg.get("entries", {})
-            raw_entry = entries.get("tokenwatch") or entries.get("hermes-token-monitor")
+            raw_entry = entries.get("tokenwatch", entries.get("hermes-token-monitor"))
             if isinstance(raw_entry, dict):
                 data.update(raw_entry)
+                for namespace in ("config", "settings"):
+                    nested = raw_entry.get(namespace, {})
+                    if not isinstance(nested, dict):
+                        raise TypeError(f"tokenwatch.{namespace} must be an object")
+                    data.update(nested)
     except (ImportError, AttributeError, KeyError) as exc:
         logger.debug("Failed to read hermes configuration dynamically: %s", exc)
 
@@ -89,7 +101,13 @@ def load_config() -> MonitorConfig:
         try:
             override = json.loads(text)
         except json.JSONDecodeError:
-            import yaml
+            try:
+                import hermes_yaml as yaml
+            except ImportError:
+                try:
+                    import yaml
+                except ImportError as exc:
+                    raise ValueError("YAML config requires Hermes or PyYAML; JSON needs neither") from exc
             override = yaml.safe_load(text)
         if not isinstance(override, dict):
             raise ValueError("Token monitor configuration must be an object")
@@ -101,6 +119,12 @@ def load_config() -> MonitorConfig:
         legacy_state = profile_home() / "tokenwatch/state.json"
         if in_hermes or os.getenv("HERMES_HOME") or legacy_state.is_file():
             data["state_file"] = str(legacy_state)
+
+    # Relative user paths belong to the active profile, never the gateway's cwd.
+    for key in ("state_file", "prom_export_path"):
+        if data.get(key) and isinstance(data[key], str):
+            path = Path(data[key]).expanduser()
+            data[key] = str(path if path.is_absolute() else profile_home() / path)
 
     return MonitorConfig.from_dict(data)
 

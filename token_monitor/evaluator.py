@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from token_monitor.config import MonitorConfig
-from token_monitor.ledger import UsageRecord
+from .config import MonitorConfig
+from .ledger import UsageRecord
 
 
 @dataclass
@@ -17,16 +17,25 @@ class EvaluationResult:
     message: str = ""
 
 
+def budget_progress(record: UsageRecord, config: MonitorConfig) -> tuple[str, int, int]:
+    """Use the most consumed enabled quota for warnings and the reply footer."""
+    quotas = [(name, getattr(record, f"{name}_tokens"), getattr(config, f"limit_{name}_tokens"))
+              for name in ("total", "input", "output")
+              if getattr(config, f"limit_{name}_tokens") > 0]
+    return max(quotas, key=lambda item: item[1] / item[2]) if quotas else (
+        "total", record.total_tokens, 0)
+
+
 def evaluate_usage(record: UsageRecord, config: MonitorConfig) -> EvaluationResult:
     """Evaluate current record against configured thresholds and limits."""
     new_levels: list[float] = []
     messages: list[str] = []
 
-    limit = config.limit_total_tokens
+    metric, used, limit = budget_progress(record, config)
     if limit > 0:
         for lvl in config.warning_levels:
-            thresh = int(limit * lvl)
-            if record.total_tokens >= thresh:
+            thresh = limit * lvl
+            if used >= thresh:
                 already = any(abs(warned - lvl) < 1e-4 for warned in record.warned_levels)
                 if not already:
                     new_levels.append(lvl)
@@ -35,14 +44,14 @@ def evaluate_usage(record: UsageRecord, config: MonitorConfig) -> EvaluationResu
             highest = max(new_levels)
             pct = int(highest * 100)
             messages.append(
-                f"⚠️ Token usage reached {pct}% ({record.total_tokens:,}/{limit:,} tokens in {config.scope} scope)"
+                f"Token {metric} usage reached {pct}% ({used:,}/{limit:,} tokens in {config.scope} scope)"
             )
 
     should_freeze = False
     freeze_reason = ""
-    if config.freeze_on_limit and limit > 0 and record.total_tokens >= limit:
+    if config.freeze_on_limit and limit > 0 and used >= limit:
         should_freeze = True
-        freeze_reason = f"Limit reached ({record.total_tokens:,}/{limit:,} tokens)"
+        freeze_reason = f"Limit reached ({used:,}/{limit:,} {metric} tokens)"
         messages.append(f"🛑 Freeze triggered: {freeze_reason}")
 
     return EvaluationResult(

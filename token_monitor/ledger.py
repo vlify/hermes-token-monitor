@@ -16,7 +16,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from token_monitor.config import MonitorConfig
+from .config import MonitorConfig
 
 # Bounded replay protection: recent identified requests survive process restart.
 MAX_PROCESSED_REQUESTS = 4096
@@ -227,7 +227,7 @@ class TokenLedger:
                      total_tokens: int | None = None, current_date: str | None = None,
                      *, request_id: str = "", **usage: int):
         """Return newly committed threshold transitions, or None for a duplicate request."""
-        from token_monitor.evaluator import evaluate_usage
+        from .evaluator import evaluate_usage
         date_str = current_date or self._today()
         tot = total_tokens if total_tokens is not None else input_tokens + output_tokens
         # Validate the incoming delta before entering the write transaction.

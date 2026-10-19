@@ -15,6 +15,9 @@ classifiers = [
 ]
 dependencies = []
 
+[project.entry-points."hermes_agent.plugins"]
+tokenwatch = "token_monitor"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",

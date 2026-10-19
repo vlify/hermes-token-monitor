@@ -7,4 +7,58 @@ provides_hooks:
   - on_session_start
   - on_session_end
   - transform_llm_output
+  - post_auxiliary_call
 provides_tools: []
+config_schema:
+  scope:
+    type: str
+    description: "Quota scope: session, daily or all_time"
+    default: session
+  limit_total_tokens:
+    type: int
+    description: "Total token quota; 0 disables this limit"
+    default: 20000000
+  limit_input_tokens:
+    type: int
+    description: "Input quota including cache reads/writes; 0 disables this limit"
+    default: 0
+  limit_output_tokens:
+    type: int
+    description: "Output quota including reasoning; 0 disables this limit"
+    default: 0
+  warning_levels:
+    type: list
+    description: "Fractions in (0, 1], shared across enabled quotas"
+    default: [0.5, 0.8, 0.95]
+  freeze_on_limit:
+    type: bool
+    description: "Block subsequent tool calls when any enabled quota is reached"
+    default: false
+  notify_console:
+    type: bool
+    description: "Log newly crossed warning thresholds"
+    default: true
+  footer_mode:
+    type: str
+    description: "Reply footer: off, on_warning or always"
+    default: on_warning
+  footer_warning_interval:
+    type: int
+    description: "Show a warning footer every N replies per session"
+    default: 1
+  language:
+    type: str
+    description: "Reply footer language: en or zh"
+    default: en
+  include_auxiliary_calls:
+    type: bool
+    description: "Include titling, compression and other auxiliary usage when Hermes emits it"
+    default: false
+  state_file:
+    type: str
+    description: "Optional ledger path; relative paths use the active profile"
+    default: ""
+  prom_export_path:
+    type: str
+    description: "Optional Prometheus textfile; empty disables export"
+    default: ""

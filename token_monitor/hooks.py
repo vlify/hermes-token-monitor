@@ -4,31 +4,16 @@ from __future__ import annotations
 
 import logging
 import threading
+from dataclasses import asdict
 from typing import Any
 
-from token_monitor.config import MonitorConfig
-from token_monitor.exporter import PrometheusExporter
-from token_monitor.ledger import TokenLedger
+from .config import MonitorConfig
+from .evaluator import budget_progress
+from .exporter import PrometheusExporter
+from .ledger import TokenLedger
+from .usage import extract_usage
 
 logger = logging.getLogger("hermes.plugin.token_monitor")
-
-
-def _extract_usage(usage: Any, response: Any) -> tuple[int, int, int]:
-    if not isinstance(usage, dict) and isinstance(response, dict):
-        usage = response.get("usage")
-    if isinstance(usage, dict):
-        inp = int(usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0)
-        out = int(usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0)
-        tot = int(usage.get("total_tokens", inp + out) or (inp + out))
-        return inp, out, tot
-    if response is not None and hasattr(response, "usage"):
-        u = getattr(response, "usage", None)
-        if u:
-            inp = int(getattr(u, "prompt_tokens", getattr(u, "input_tokens", 0)) or 0)
-            out = int(getattr(u, "completion_tokens", getattr(u, "output_tokens", 0)) or 0)
-            tot = int(getattr(u, "total_tokens", inp + out) or (inp + out))
-            return inp, out, tot
-    return 0, 0, 0
 
 
 class TokenMonitorHooks:
@@ -36,13 +21,14 @@ class TokenMonitorHooks:
 
     def __init__(self, config: MonitorConfig | None = None):
         if config is None:
-            from token_monitor.config import load_config
+            from .config import load_config
 
             config = load_config()
         self.config = config
         self.ledger = TokenLedger(self.config)
         self._footer_turns: dict[str, int] = {}
         self._footer_lock = threading.Lock()
+        self._diagnostics: set[str] = set()
         self.exporter = (
             PrometheusExporter(self.config.prom_export_path)
             if self.config.prom_export_path
@@ -71,18 +57,17 @@ class TokenMonitorHooks:
         **kwargs: Any,
     ) -> None:
         sid = str(session_id or "default").strip() or "default"
-        inp, out, tot = _extract_usage(usage, response)
-        if tot <= 0:
+        if not session_id:
+            self._warn_once("identity", "Usage has no session_id; stored in the shared default bucket")
+        try:
+            delta = extract_usage(usage, response)
+        except ValueError as exc:
+            self._warn_once("invalid_usage", f"Invalid usage ignored; accounting is incomplete: {exc}")
             return
-
-        raw = usage if isinstance(usage, dict) else (
-            response.get("usage", {}) if isinstance(response, dict) else {})
-        extra = {
-            "cache_read_tokens": int(raw.get("cache_read_tokens", raw.get("cached_tokens", 0)) or 0),
-            "cache_write_tokens": int(raw.get("cache_write_tokens", 0) or 0),
-            "reasoning_tokens": int(raw.get("reasoning_tokens", raw.get("thinking_tokens", 0)) or 0),
-        }
-        res = self.ledger.record_usage(sid, inp, out, tot, request_id=api_request_id, **extra)
+        if delta is None:
+            self._warn_once("missing_usage", "No positive usage reported; accounting may be incomplete")
+            return
+        res = self.ledger.record_usage(sid, request_id=api_request_id, **asdict(delta))
         if res is None:
             return
         if res.new_warning_levels and self.config.notify_console:
@@ -92,7 +77,21 @@ class TokenMonitorHooks:
             logger.error("[token_monitor] %s", res.freeze_reason)
 
         if self.exporter:
-            self.exporter.export(self.ledger, active_session_id=sid)
+            try:
+                self.exporter.export(self.ledger, active_session_id=sid)
+            except OSError as exc:
+                self._warn_once("export", f"Metrics export failed; ledger accounting succeeded: {exc}")
+
+    def _warn_once(self, key: str, message: str) -> None:
+        with self._footer_lock:
+            if key in self._diagnostics:
+                return
+            self._diagnostics.add(key)
+        logger.warning("[token_monitor] %s", message)
+
+    def on_post_auxiliary_call(self, **kwargs: Any) -> None:
+        if self.config.include_auxiliary_calls:
+            self.on_post_api_request(**kwargs)
 
     def on_pre_tool_call(
         self,
@@ -120,24 +119,32 @@ class TokenMonitorHooks:
             return None
         sid = str(session_id or "default").strip() or "default"
         record = self.ledger.get_scoped_stats(sid)
-        limit = self.config.limit_total_tokens
+        metric, used, limit = budget_progress(record, self.config)
         with self._footer_lock:
             turn = self._footer_turns.get(sid, 0) + 1
             self._footer_turns[sid] = turn
         if self.config.footer_mode == "on_warning":
             levels = self.config.warning_levels
-            if not levels or limit <= 0 or record.total_tokens < int(limit * min(levels)):
+            if not levels or limit <= 0 or used < limit * min(levels):
                 return None
             if (turn - 1) % self.config.footer_warning_interval:
                 return None
-        used = record.total_tokens
         if limit > 0:
             text = f"Token: {int(used / limit * 100)}% ({_compact(used)}/{_compact(limit)})"
         else:
             text = f"Token: {_compact(used)}"
+        if metric != "total":
+            text += f" {metric}"
+        zh = self.config.language == "zh"
         if self.config.scope != "session":
-            text += f" {self.config.scope} | 全局累计，/new 不重置"
-        ending = "limit reached. 已达上限" if limit > 0 and used >= limit else "used. 建议规划收尾"
+            text += f" {self.config.scope} | " + (
+                "全局累计，/new 不重置" if zh else "shared budget; /new does not reset it")
+        if limit > 0 and used >= limit:
+            ending = "已达上限" if zh else "limit reached"
+        elif limit > 0:
+            ending = "建议规划收尾" if zh else "used; plan to wrap up"
+        else:
+            ending = "未设置额度" if zh else "no limit configured"
         return f"{response_text}\n\n---\n[{text} {ending}]"
 
     def on_session_end(self, *, session_id: str = "", **kwargs: Any) -> None:

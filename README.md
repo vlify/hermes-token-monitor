@@ -1,87 +1,132 @@
 # hermes-token-monitor
 
-A robust, thread-safe, and process-safe token usage monitoring and threshold enforcement plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent).
+Hermes Agent 的 token 统计与额度插件，插件标识为 `tokenwatch`。按会话、每日或全部历史累计用量；在回复尾部提示额度；可选阻止后续工具调用、导出 Prometheus textfile。
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests](https://img.shields.io/badge/tests-11%20passed-brightgreen.svg)]()
-[![Python: 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)]()
+## 安装与启用
 
----
+通过 Hermes 官方插件管理器安装本仓库的**已发布版本**：
 
-## Highlights
-
-* **True Multi-Session Isolation**: Completely resolves legacy state clobbering (`A100 -> B200 -> A50` correctly accumulates $150$ for session A and $200$ for session B).
-* **POSIX File Locking (`fcntl.flock`)**: Safe atomic read-modify-write transactions across concurrent threads and background subagents, preventing lost counts or race conditions.
-* **Smart Alert State Machine**: Decouples warning state between sessions and daily scopes. Eliminates repeated alert loops when running `/new`.
-* **Execution Guard & Freezing**: Optional hard freeze (`freeze_on_limit = true`) that intercepts `pre_tool_call` when quota is exhausted.
-* **Prometheus Metrics Exporter**: Optional textfile exporter for `node_exporter` / scraping systems.
-
----
-
-## Architecture
-
-```text
-token_monitor/
-├── __init__.py      # Hermes plugin registration & lifecycle entrypoint
-├── config.py        # Typed configuration & environment parser
-├── ledger.py        # Atomic POSIX-locked token persistence ledger
-├── evaluator.py     # Threshold alert & freeze state machine
-├── hooks.py         # Lifecycle hooks (post_api_request, pre_tool_call)
-└── exporter.py      # Prometheus exposition format writer
+```bash
+hermes plugins install vlify/hermes-token-monitor --no-enable
+hermes plugins doctor tokenwatch --ci
+hermes plugins enable tokenwatch
 ```
 
----
+尚未发布的本地改动，先对源码目录验证：
 
-## Configuration
+```bash
+hermes plugins doctor /absolute/path/to/hermes-token-monitor --ci
+```
 
-Configure in your Hermes `config.yaml` or via environment variables:
+也可把包含 `plugin.yaml`、根 `__init__.py` 和 `token_monitor/` 的目录放到**目标 profile 的** `plugins/tokenwatch/`，再启用。目标根目录遵循 Hermes 的 profile 和 `HERMES_HOME` 解析，不需要使用作者的目录布局。已有插件请先备份；账本放在插件代码目录之外。
+
+Python 包另提供 `hermes_agent.plugins` entry point，供 Hermes 环境包管理器安装后发现；仅在另一个 venv 中 pip 安装不会自动进入正在运行的 Hermes。目录安装同时提供 manifest 的设置表单，推荐普通用户使用。
+
+已有进程如何重新加载插件，遵循所用 Hermes 版本的机制；文件更新不能证明运行中的网关已加载。插件不自动重启服务、不改写主配置。
+
+目录插件的业务模块使用 Hermes 分配的模块命名空间，支持宿主的插件热加载，避免全局导入缓存继续执行旧代码。安装新版后仍需由宿主重新发现插件。
+
+## 配置
+
+在目标 profile 的 Hermes 配置中手动设置，或使用支持插件设置表单的 Hermes 界面：
 
 ```yaml
 plugins:
+  enabled:
+    - tokenwatch
   entries:
     tokenwatch:
-      scope: "session"                # "session" | "daily" | "all_time"
-      limit_total_tokens: 20000000
-      warning_levels: [0.5, 0.8, 0.95]
-      freeze_on_limit: false
-      notify_console: true
-      footer_mode: "on_warning"        # off | on_warning | always
-      footer_warning_interval: 1
+      settings:
+        scope: session
+        limit_total_tokens: 20000000
+        limit_input_tokens: 0
+        limit_output_tokens: 0
+        warning_levels: [0.5, 0.8, 0.95]
+        freeze_on_limit: false
+        footer_mode: on_warning
+        footer_warning_interval: 1
+        language: en
+        include_auxiliary_calls: false
 ```
 
-### Environment Overrides
+`language: zh` 使用中文回复提示；日志与管理命令保留英文技术字段。默认只提示、不冻结。额度单位是 token；各额度的 `0` 表示关闭该项，任意启用额度达到上限均可触发冻结。`warning_levels` 是 `(0, 1]` 的小数，`80` 不是 `80%`。警告进度取已启用额度中使用比例最高的一项；同一范围共用一组已发阈值，避免每种额度重复提醒。旧账本已发警告记录继续保留。
 
-* `HERMES_TOKEN_MONITOR_CONFIG`: Path to JSON/YAML configuration file.
-* `HERMES_TOKEN_MONITOR_STATE`: Explicit state file override. In Hermes, the default is the current profile's `tokenwatch/state.json`; standalone use retains `~/.local/state/hermes/token_monitor/state.json`.
+| 设置 | 默认值 | 含义 |
+|---|---|---|
+| `scope` | `session` | `session`、`daily` 或 `all_time` |
+| `limit_total_tokens` | `20000000` | 总 token 额度 |
+| `limit_input_tokens` / `limit_output_tokens` | `0` | 输入／输出额度 |
+| `warning_levels` | `[0.5, 0.8, 0.95]` | 阈值比例，排序并去重 |
+| `freeze_on_limit` | `false` | 超限后阻止工具调用 |
+| `notify_console` | `true` | 记录新跨越阈值的日志 |
+| `footer_mode` | `on_warning` | `off`、`on_warning` 或 `always` |
+| `footer_warning_interval` | `1` | 每 N 次该会话的非空回复展示警告 |
+| `language` | `en` | 回复提示语言：`en` 或 `zh` |
+| `include_auxiliary_calls` | `false` | 是否统计辅助调用 |
+| `state_file` | 当前 profile 的 `tokenwatch/state.json` | 自定义账本路径 |
+| `prom_export_path` | 空 | Prometheus textfile 路径；空值关闭 |
 
-## 状态保全与兼容
+兼容旧的 `plugins.entries.tokenwatch` 平铺配置与 `config` 子树，也兼容 `hermes-token-monitor` 旧标识。优先级从低到高：
 
-- getter 不再写入状态文件；损坏 JSON、错误结构或非法计数会抛出 `LedgerStateError` 并保留原文件，不自动清零。先备份和排查损坏原因，不能直接用空账本覆盖历史。
-- 正常增量写入时兼容旧 `day/daily`、单会话镜像、sessions 注册表、全局冻结和已发 total 阈值。保留缓存/思考计数、未知字段与原始 warned_keys；不重建旧版本已经丢失的历史。
-- 请求计数、去重、阈值和冻结转换在同一 POSIX 文件锁事务内提交。具备 api_request_id 的请求按会话去重，最近 4096 个请求身份的摘要持久化；超出窗口的重放不保证去重。缺少请求身份时不按 token 数猜测重复。
-- 默认恢复回复 footer，独立网关通知保持关闭；不新增消息注入或外部投递。footer 走 Hermes 的 `transform_llm_output`，不会重写历史消息；达到软阈值时提示收尾，启用 freeze_on_limit 才通过 action=block 阻止工具。
-- 更换插件文件不等于运行网关已加载。主配置和服务操作由用户执行；本轮代码更新不自动重启或主动迁移生产账本。
+```text
+默认值
+  → 当前插件条目的平铺配置
+  → config 子树
+  → settings 子树
+  → HERMES_TOKEN_MONITOR_CONFIG 指定的 JSON/YAML 文件
+  → HERMES_TOKEN_MONITOR_STATE 指定的账本路径
+```
 
-迁移测试只用合成旧状态，不能读取真实生产账本。完整测试从 Hermes 源码仓的官方 runner 执行，并通过 `-o pythonpath=<本项目绝对路径>` 指定候选；具体命令与结果见本轮修复交接。
+新旧标识同时存在时使用 `tokenwatch`。相对账本和导出路径以当前 profile 为基准，不随启动工作目录变化；`~` 展开到当前用户。未在 Hermes 中运行且未指定 profile 时，独立账本默认位于 `~/.local/state/hermes/token_monitor/state.json`。独立使用 YAML 需要 Hermes YAML 库或 PyYAML；JSON 无额外依赖。
 
----
+设置在下一次 Hook 调用时重新读取，账本继续保留。显式把不同 profile 指向同一账本，等于主动共享配额和会话 ID 命名空间；默认各自隔离。非法类型、负额度、无效范围会给出包含设置名的错误，不把字符串 `"false"` 当作布尔值。旧 `notify_gateway: true` 会明确报错：独立网关通知未实现，请使用 footer 或指标导出。
 
-## Testing
+## 统计与冻结口径
 
-Run unit and concurrency tests locally:
+- 主调用接收 `post_api_request` 中 Hermes 归一化后的 usage。输入统计优先取包含缓存的 `prompt_tokens`；缓存读写作为明细保留，不重复加到总量。思考 token 是输出明细，不额外加到输出／总量。
+- 兼容 `input/output_tokens` 和 OpenAI 形状的 SDK usage；provider 原生格式应由 Hermes 归一化，不在插件中重复实现 provider 适配。
+- 开启 `include_auxiliary_calls` 后接收 `post_auxiliary_call`，包括 Hermes 经该路径发出的标题、压缩等调用。父会话 ID 存在时归入父会话；缺失身份时使用共享 `default` 桶并记录一次警告，不猜测所属会话。子 Agent 使用事件携带的会话 ID，不自动合并到父会话。
+- 每个有 `api_request_id` 的事件按会话去重，最近 4096 个身份摘要持久化；超出窗口的重放不保证去重。没有身份时不按相同 token 数猜测重复。
+- 缺失、零值或非法 usage 不生成 token 数，并记录一次诊断。未发出事件的调用无法被插件感知，账本不能视为供应商账单。
+- `daily` 按运行进程的本地日期切换，`/new` 不清零每日或全部历史额度。多个进程共享账本时应使用同一时区和本地文件系统。
+- `freeze_on_limit` 通过 `pre_tool_call` 返回 `action=block`；不能撤销已发送请求、停止所有后续 API 请求或充当资金硬上限。冻结持久化，修改额度不会自动清除旧冻结。
+
+CLI、网关、定时任务、子 Agent 的覆盖都取决于相应执行路径是否发出上述 Hook。Codex app-server 等特殊运行时需要宿主提供 usage 桥接；仅安装插件不能补齐缺失的事件。提示是否展示也取决于宿主是否调用 `transform_llm_output`，以及其他输出变换插件的执行顺序。
+
+## 查看与解除冻结
 
 ```bash
-uv run --with pytest pytest
+hermes tokenwatch status
+hermes tokenwatch status --session SESSION_ID
+hermes tokenwatch unfreeze --session SESSION_ID
 ```
 
-Run static analysis:
+命令使用当前 profile 和配置的 scope。`session` 模式不指定 ID 时，`status` 显示全部历史汇总，`unfreeze` 拒绝执行；`daily`／`all_time` 模式的 `unfreeze` 清除当前共享范围的冻结。先确认／调整额度再解除冻结；用量仍超限时后续新 usage 会重新触发冻结。命令不清空历史计数，不提供隐式重置。
+
+## 数据与支持范围
+
+账本用 POSIX `fcntl.flock` 串行化完整读改写事务，并原子替换。损坏 JSON、非法结构或计数会抛出 `LedgerStateError` 并保留原文件；不自动清零。兼容旧单会话、日统计、全局冻结、缓存／思考计数和未知字段，不恢复旧版本已丢失的历史。账本含会话 ID 和用量，不保存提示词、回复或 API 密钥。
+
+Prometheus 导出是本地 textfile，不自动启动 HTTP 服务或发送数据。会话标签转义特殊字符；导出失败记录诊断，不撤销成功的记账。
+
+声明 Python 3.10+ 的 POSIX 支持范围；实际回归在 Linux/Python 3.11 完成，包构建在 Python 3.14 完成。macOS 仍需宿主实测；原生 Windows、网络文件系统、跨主机分布式记账不在当前支持范围，可在 Linux/WSL 中使用。最低 Hermes 版本尚未完成版本矩阵验证，应使用具有 `load_config_readonly`、profile 路径 API、`post_api_request`、`pre_tool_call` 和 `transform_llm_output` 的版本。辅助统计还需 `post_auxiliary_call`。
+
+暂不提供价格表、费用换算、按 provider/model 分账及差异化额度。这些可以后续扩展，不影响当前按 profile／会话统计的使用范围。
+
+## 验证
+
+官方契约：[插件文档](https://hermes-agent.nousresearch.com/docs/user-guide/features/plugins)、[事件 Hook 文档](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/hooks.md)。
+
+测试使用临时 profile、配置和账本，通过对应 Hermes checkout 的官方 runner 执行。例如在 Hermes 源码根目录，指定具有 pytest 的测试解释器：
 
 ```bash
-uv run --with ruff ruff check .
+HERMES_PYTHON=/path/to/test/python scripts/run_tests.sh -j 2 \
+  /absolute/path/to/hermes-token-monitor/tests \
+  -o pythonpath=/absolute/path/to/hermes-token-monitor
 ```
 
----
+测试包括配置优先级、profile ContextVar 隔离、并发事务、旧状态保全、事件去重、缓存计数、三类额度、辅助统计开关、语言、实际 Hook 阻断和管理命令。测试不读生产账本、不发送通知、不调用真实模型。
 
 ## License
 
-[MIT License](LICENSE) © 2026 vlify
+MIT，见 [LICENSE](LICENSE)。

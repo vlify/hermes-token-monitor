@@ -6,7 +6,11 @@ import os
 import uuid
 from pathlib import Path
 
-from token_monitor.ledger import TokenLedger
+from .ledger import TokenLedger
+
+
+def _label(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
 
 
 class PrometheusExporter:
@@ -27,6 +31,7 @@ class PrometheusExporter:
         # 1. Active session metrics
         if active_session_id:
             s_stats = ledger.get_session_stats(active_session_id)
+            active_session_id = _label(active_session_id)
             lines.append(
                 f'hermes_tokens_total{{scope="session",session_id="{active_session_id}",type="input"}} {s_stats.input_tokens}'
             )
